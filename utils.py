@@ -6,7 +6,9 @@ Created on 2023-01-18$
 @author: Jonathan Beaulieu-Emond
 """
 import torch
-
+import numpy as np
+import albumentations as A
+import random
 def training_loop(
         model, loader, optimizer, criterion, device, scaler, clip_norm, autocast, scheduler, epoch
 ):
@@ -47,11 +49,12 @@ def training_loop(
         scaler.scale(loss).backward()
 
         #Unscales the gradients of optimizer's assigned params in-place
-        scaler.unscale_(optimizer)
-        # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
-        torch.nn.utils.clip_grad_norm_(
-            model.parameters(), clip_norm
-        )
+        if clip_norm>0 :
+            scaler.unscale_(optimizer)
+            # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), clip_norm
+            )
 
         scaler.step(optimizer)
         scaler.update()
@@ -103,7 +106,7 @@ def validation_loop(model, loader, criterion, device, autocast):
         # forward + backward + optimize
         with torch.cuda.amp.autocast(enabled=autocast):
             outputs = model(images)
-            loss = criterion(outputs.float(), labels.float())
+            loss = criterion(outputs, labels)
 
         outputs = torch.sigmoid(outputs)
         outputs = outputs.detach().cpu().squeeze()
@@ -112,7 +115,7 @@ def validation_loop(model, loader, criterion, device, autocast):
 
         results[1] = torch.cat((results[1], outputs), dim=0)
         results[0] = torch.cat(
-            (results[0], labels.cpu().round(decimals=0)), dim=0
+            (results[0], labels.cpu()), dim=0
         )  # round to 0 or 1
 
         del (
@@ -123,3 +126,46 @@ def validation_loop(model, loader, criterion, device, autocast):
         )  # garbage management sometimes fails with cuda
 
     return running_loss, results
+
+
+#--------------------------------------------------------------------------------------------------------------
+def randAugment(N, M, p, mode="all", cut_out=False):  # Magnitude(M) search space
+    shift_x = np.linspace(0,10,10)
+    shift_y = np.linspace(0, 10, 10)
+    rot = np.linspace(0, 30, 10)
+    shear = np.linspace(0, 10, 10)
+    sola = np.linspace(0, 256, 10)
+    post = [4, 4, 5, 5, 6, 6, 7, 7, 8, 8]
+    cont = [np.linspace(-0.8, -0.1, 10), np.linspace(0.1, 2, 10)]
+    bright = np.linspace(0.1, 0.7, 10)
+    shar = np.linspace(0.1, 0.9, 10)
+    cut = np.linspace(0, 60, 10)  # Transformation search space
+    Aug =[
+    A.ShiftScaleRotate(shift_limit_x=shift_x[M], rotate_limit=0, shift_limit_y=0, shift_limit=shift_x[M], p=p),
+    A.ShiftScaleRotate(shift_limit_y=shift_y[M], rotate_limit=0, shift_limit_x=0, shift_limit=shift_y[M], p=p),
+    A.Affine(rotate=rot[M],shear=shear[M], p=p),
+    A.InvertImg(p=p),
+    # 5 - Color Based
+    A.Equalize(p=p),
+    A.Solarize(threshold=sola[M], p=p),
+    A.Posterize(num_bits=post[M], p=p),
+    A.RandomContrast(limit=[cont[0][M], cont[1][M]], p=p),
+    A.RandomBrightness(limit=bright[M], p=p),
+    A.Sharpen(alpha=shar[M], lightness=shar[M],p=p)
+    ]# Sampling from the Transformation search space
+    if mode == "geo":
+
+        ops = random.choices(Aug[0:5], k=N)
+    elif mode == "color":
+
+        ops = random.choices(Aug[5:], k=N)
+    else:
+
+        ops = random.choices(Aug, k=N)
+
+    if cut_out:
+        ops.append(A.Cutout(num_holes=8, max_h_size=int(cut[M]), max_w_size=int(cut[M]), p=p))
+
+
+
+    return ops
